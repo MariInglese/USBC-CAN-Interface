@@ -25,12 +25,12 @@ class CANUI:
         conn_frame = ttk.LabelFrame(self.root, text="Connection Settings", padding=10)
         conn_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        ttk.Label(conn_frame, text="TX Port (ESP32):").grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(conn_frame, text="TX Port (Arduino):").grid(row=0, column=0, sticky=tk.W)
         self.tx_port = ttk.Entry(conn_frame, width=15)
         self.tx_port.insert(0, "COM3")
         self.tx_port.grid(row=0, column=1, padx=5)
         
-        ttk.Label(conn_frame, text="RX Port (Arduino):").grid(row=0, column=2, sticky=tk.W)
+        ttk.Label(conn_frame, text="RX Port (ESP):").grid(row=0, column=2, sticky=tk.W)
         self.rx_port = ttk.Entry(conn_frame, width=15)
         self.rx_port.insert(0, "COM4")
         self.rx_port.grid(row=0, column=3, padx=5)
@@ -95,18 +95,20 @@ class CANUI:
             
             self.log_message("STATUS", "Connected to CAN Bus")
             
-            # Check for initial ready messages
-            self.root.after(500, self.check_ready_messages)
-            
         except Exception as e:
             messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
             self.disconnect()
     
     def disconnect(self):
         self.running = False
-        if self.tx_serial:
+        # Flush and close serial connections
+        if self.tx_serial and self.tx_serial.is_open:
+            self.tx_serial.reset_input_buffer()
+            self.tx_serial.reset_output_buffer()
             self.tx_serial.close()
-        if self.rx_serial:
+        if self.rx_serial and self.rx_serial.is_open:
+            self.rx_serial.reset_input_buffer()
+            self.rx_serial.reset_output_buffer()
             self.rx_serial.close()
         self.connect_btn.config(text="Connect")
         self.status_label.config(text="Disconnected", foreground="red")
@@ -149,10 +151,17 @@ class CANUI:
     def read_messages(self):
         while self.running:
             try:
+                # Check RX port (Arduino receiver)
                 if self.rx_serial.in_waiting:
                     line = self.rx_serial.readline().decode('utf-8', errors='ignore').strip()
                     if line:
-                        self.message_queue.put(line)
+                        self.message_queue.put(("RX_PORT", line))
+                
+                # Check TX port (ESP32 transmitter) for debug messages
+                if self.tx_serial.in_waiting:
+                    line = self.tx_serial.readline().decode('utf-8', errors='ignore').strip()
+                    if line:
+                        self.message_queue.put(("TX_PORT", line))
             except Exception as e:
                 pass
         
@@ -162,37 +171,15 @@ class CANUI:
     def process_message_queue(self):
         try:
             while True:
-                msg = self.message_queue.get_nowait()
-                self.parse_and_display_message(msg)
+                msg_source, msg_content = self.message_queue.get_nowait()
+                self.parse_and_display_message(msg_content, msg_source)
         except queue.Empty:
             pass
         
         if self.running:
             self.root.after(100, self.process_message_queue)
     
-    def check_ready_messages(self):
-        """Check for initial READY messages from devices"""
-        if not self.running:
-            return
-        
-        try:
-            # Check TX
-            if self.tx_serial.in_waiting:
-                line = self.tx_serial.readline().decode('utf-8', errors='ignore').strip()
-                if line:
-                    self.parse_and_display_message(line)
-            
-            # Check RX
-            if self.rx_serial.in_waiting:
-                line = self.rx_serial.readline().decode('utf-8', errors='ignore').strip()
-                if line:
-                    self.parse_and_display_message(line)
-        except:
-            pass
-        
-        self.root.after(500, self.check_ready_messages)
-    
-    def parse_and_display_message(self, msg):
+    def parse_and_display_message(self, msg, source=""):
         """Parse incoming serial messages"""
         if msg.startswith("RX|"):
             # Received message from CAN bus
@@ -200,6 +187,9 @@ class CANUI:
         elif msg.startswith("TX|"):
             # Transmitted message confirmation
             self.log_message("TX_ACK", msg[3:])
+        elif msg.startswith("DEBUG|"):
+            # Debug message from transmitter
+            self.log_message("DEBUG", msg[6:])
         elif msg.startswith("READY|"):
             # Device ready
             self.log_message("READY", msg[6:])
@@ -218,6 +208,7 @@ class CANUI:
             "RX": "#00AA00",      # Green
             "TX_SENT": "#0000FF", # Blue
             "TX_ACK": "#00AAFF",  # Light Blue
+            "DEBUG": "#9900FF",   # Purple
             "STATUS": "#FF8800",  # Orange
             "READY": "#00AA00",   # Green
             "ERROR": "#FF0000",   # Red
